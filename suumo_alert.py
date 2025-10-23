@@ -2,10 +2,17 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import os
+import re
 
 # SUUMO検索URL（川西能勢口駅・2LDK以上）
 SEARCH_URL = "https://suumo.jp/chintai/hyogo/ek_10110/nj_207/"
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; Bot/0.1)"}
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/117.0.0.0 Safari/537.36"
+    )
+}
 STORED_FILE = "prev_results.json"
 
 def fetch_listings():
@@ -23,7 +30,7 @@ def fetch_listings():
 
         try:
             walk_text = el.select_one(".cassetteitem_detail-text").get_text(strip=True)
-            walk_min = int(walk_text.split("歩")[1].replace("分", "").strip())
+            walk_min = int(re.search(r"(\d+)分", walk_text).group(1))
         except Exception:
             walk_min = 99
 
@@ -71,7 +78,7 @@ def notify_slack(items):
         return
 
     if not items:
-        print("No new listings.")
+        print("No new listings to notify.")
         return
 
     text = "*🏠 SUUMO 新着物件情報*\n"
@@ -79,7 +86,16 @@ def notify_slack(items):
         text += f"• <{it['link']}|{it['title']}>（徒歩{it['walk_min']}分 / {it['layout']})\n"
 
     payload = {"text": text}
-    requests.post(webhook, json=payload)
+
+    try:
+        response = requests.post(webhook, json=payload)
+        if response.status_code == 200:
+            print(f"✅ Slack通知成功: {len(items)}件の新着物件を通知しました。")
+        else:
+            print(f"❌ Slack通知失敗: ステータスコード {response.status_code}")
+            print(f"レスポンス内容: {response.text}")
+    except Exception as e:
+        print(f"❌ Slack通知中に例外が発生しました: {e}")
 
 def main():
     now = fetch_listings()
@@ -88,6 +104,8 @@ def main():
     new_items = detect_new(prev, filtered)
     if new_items:
         notify_slack(new_items)
+    else:
+        print("新着物件はありません。")
     save_now(filtered)
 
 if __name__ == "__main__":
