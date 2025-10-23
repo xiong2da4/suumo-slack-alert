@@ -1,0 +1,27 @@
+name: SUUMO Slack Alert
+
+on:
+  schedule:
+    - cron: "0 * * * *"  # 毎時実行（日本時間だと＋9時間）
+  workflow_dispatch:      # 手動実行ボタンも有効
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run SUUMO script
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        run: python suumo_alert.py
