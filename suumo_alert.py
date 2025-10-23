@@ -15,7 +15,7 @@ def fetch_listings():
     soup = BeautifulSoup(resp.text, "html.parser")
     items = []
     for el in soup.select(".cassetteitem"):
-        title_el = el.select_one(".cassetteitem_content-title")
+        title_el = el.select_one(".cassetteitem_content-title a")
         if not title_el:
             continue
         title = title_el.get_text(strip=True)
