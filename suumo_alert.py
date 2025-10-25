@@ -1,112 +1,158 @@
 import requests
 from bs4 import BeautifulSoup
-import json
+import time
+import csv
 import os
-import re
+from slack_sdk.webhook import WebhookClient
 
-# SUUMO検索URL（川西能勢口駅・2LDK以上）
-SEARCH_URL = "https://suumo.jp/chintai/hyogo/ek_10110/nj_207/"
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/117.0.0.0 Safari/537.36"
-    )
+# --------------------------
+# 設定
+# --------------------------
+base_url = 'https://suumo.jp/chintai/hyogo/ek_10110/nj_207/'
+headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                  'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
-STORED_FILE = "prev_results.json"
+rn = 2080
+page = 1
+csv_file = "properties.csv"
 
-def fetch_listings():
-    """SUUMOから物件リストを取得"""
-    resp = requests.get(SEARCH_URL, headers=HEADERS)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    items = []
-    for el in soup.select(".cassetteitem"):
-        title_el = el.select_one(".cassetteitem_content-title a")
-        if not title_el:
-            continue
-        title = title_el.get_text(strip=True)
-        link = "https://suumo.jp" + title_el["href"]
+# 環境変数からSlack Webhook URLを取得
+slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+if not slack_webhook_url:
+    raise ValueError("Slack Webhook URL が設定されていません。環境変数 SLACK_WEBHOOK_URL を確認してください。")
 
-        try:
-            walk_text = el.select_one(".cassetteitem_detail-text").get_text(strip=True)
-            walk_min = int(re.search(r"(\d+)分", walk_text).group(1))
-        except Exception:
-            walk_min = 99
+# --------------------------
+# 既存CSV読み込み
+# --------------------------
+existing_ids = set()
+if os.path.exists(csv_file):
+    with open(csv_file, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            existing_ids.add(row["id"])
 
-        layout = el.select_one(".cassetteitem_madori").get_text(strip=True)
-        items.append({
-            "title": title,
-            "link": link,
-            "walk_min": walk_min,
-            "layout": layout
-        })
-    return items
+all_properties = []
 
-def filter_condition(items):
-    """徒歩10分以内・2LDK以上を抽出"""
-    result = []
-    for it in items:
-        if it["walk_min"] <= 10 and (
-            it["layout"].startswith("2LDK")
-            or it["layout"].startswith("3LDK")
-            or it["layout"].startswith("4LDK")
-        ):
-            result.append(it)
-    return result
-
-def load_prev():
-    try:
-        with open(STORED_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
-
-def save_now(items):
-    with open(STORED_FILE, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
-
-def detect_new(prev, now):
-    prev_links = {p["link"] for p in prev}
-    return [it for it in now if it["link"] not in prev_links]
-
-def notify_slack(items):
-    """Slack通知"""
-    webhook = os.getenv("SLACK_WEBHOOK")
-    if not webhook:
-        print("❌ SLACK_WEBHOOK not found in environment variables.")
-        return
-
-    if not items:
-        print("No new listings to notify.")
-        return
-
-    text = "*🏠 SUUMO 新着物件情報*\n"
-    for it in items:
-        text += f"• <{it['link']}|{it['title']}>（徒歩{it['walk_min']}分 / {it['layout']})\n"
-
-    payload = {"text": text}
-
-    try:
-        response = requests.post(webhook, json=payload)
-        if response.status_code == 200:
-            print(f"✅ Slack通知成功: {len(items)}件の新着物件を通知しました。")
-        else:
-            print(f"❌ Slack通知失敗: ステータスコード {response.status_code}")
-            print(f"レスポンス内容: {response.text}")
-    except Exception as e:
-        print(f"❌ Slack通知中に例外が発生しました: {e}")
-
-def main():
-    now = fetch_listings()
-    filtered = filter_condition(now)
-    prev = load_prev()
-    new_items = detect_new(prev, filtered)
-    if new_items:
-        notify_slack(new_items)
+# --------------------------
+# ページ取得ループ
+# --------------------------
+while True:
+    if page == 1:
+        url = f'{base_url}?rn={rn}'
     else:
-        print("新着物件はありません。")
-    save_now(filtered)
+        url = f'{base_url}?page={page}&rn={rn}'
 
-if __name__ == "__main__":
-    main()
+    print(f"=== ページ {page} ===")
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, 'html.parser')
+    properties = soup.find_all('div', class_='cassetteitem')
+
+    if not properties:
+        print("物件が見つからなかったため終了")
+        break
+
+    for prop in properties:
+        title_tag = prop.find('div', class_='cassetteitem_content-title')
+        title = title_tag.get_text(strip=True) if title_tag else "情報なし"
+
+        address_tag = prop.find('li', class_='cassetteitem_detail-col1')
+        address = address_tag.get_text(strip=True) if address_tag else "情報なし"
+
+        rooms_data = []
+        rooms = prop.find_all('tr', class_='js-cassette_link')
+        for room in rooms:
+            room_id = room.find('input', class_='js-clipkey')['value']  # 一意ID
+
+            rent_tag = room.find('span', class_='cassetteitem_price--rent')
+            rent = rent_tag.get_text(strip=True) if rent_tag else "-"
+
+            fee_tag = room.find('span', class_='cassetteitem_price--administration')
+            fee = fee_tag.get_text(strip=True) if fee_tag else "-"
+
+            layout_tag = room.find('span', class_='cassetteitem_madori')
+            layout = layout_tag.get_text(strip=True) if layout_tag else "-"
+
+            area_tag = room.find('span', class_='cassetteitem_menseki')
+            area = area_tag.get_text(strip=True) if area_tag else "-"
+
+            url_tag = room.find('a', class_='js-cassette_link_href')
+            room_url = url_tag['href'] if url_tag else "-"
+
+            rooms_data.append({
+                "id": room_id,
+                "rent": rent,
+                "fee": fee,
+                "layout": layout,
+                "area": area,
+                "url": room_url
+            })
+
+        all_properties.append({
+            "title": title,
+            "address": address,
+            "rooms": rooms_data
+        })
+
+    page += 1
+    time.sleep(1)
+
+# --------------------------
+# 新着物件抽出
+# --------------------------
+new_properties = []
+for prop in all_properties:
+    new_rooms = [r for r in prop['rooms'] if r['id'] not in existing_ids]
+    if new_rooms:
+        new_properties.append({
+            "title": prop['title'],
+            "address": prop['address'],
+            "rooms": new_rooms
+        })
+
+# --------------------------
+# CSVに追記
+# --------------------------
+with open(csv_file, 'a', newline="", encoding="utf-8") as f:
+    fieldnames = ["id", "title", "address", "rent", "fee", "layout", "area", "url"]
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    if os.path.getsize(csv_file) == 0:
+        writer.writeheader()
+
+    for prop in new_properties:
+        for room in prop['rooms']:
+            writer.writerow({
+                "id": room['id'],
+                "title": prop['title'],
+                "address": prop['address'],
+                "rent": room['rent'],
+                "fee": room['fee'],
+                "layout": room['layout'],
+                "area": room['area'],
+                "url": room['url']
+            })
+
+# --------------------------
+# Slack通知（部屋単位で送信）
+# --------------------------
+BASE_URL = "https://suumo.jp"
+webhook = WebhookClient(slack_webhook_url)
+
+total_new_rooms = sum(len(prop['rooms']) for prop in new_properties)
+if new_properties:
+    for prop in new_properties:
+        for room in prop['rooms']:
+            message = (
+                f"🎉 *新着物件情報* 🎉\n"
+                f"🏡 {prop['title']}  📍 {prop['address']}\n"
+                f"{room['rent']} / {room['fee']} - {room['layout']} / {room['area']}\n"
+                f"🔗 <{BASE_URL}{room['url']}|詳細>\n"
+                f"―" * 30
+            )
+            webhook.send(text=message)
+else:
+    webhook.send(text="ℹ️ 本日、新着物件はありませんでした 😊")
+
+print(f"Slack通知完了: {total_new_rooms} 件")
